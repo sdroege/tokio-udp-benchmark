@@ -1,0 +1,10 @@
+[package]
+name = "tokio-udp-benchmark"
+version = "0.1.0"
+authors = ["Sebastian Dröge <sebastian@centricular.com>"]
+
+[dependencies]
+tokio = { git = "https://github.com/tokio-rs/tokio" }
+tokio-reactor = { git = "https://github.com/tokio-rs/tokio" }
+tokio-executor = { git = "https://github.com/tokio-rs/tokio" }
+futures = "0.1"
