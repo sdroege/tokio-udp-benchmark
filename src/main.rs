@@ -4,15 +4,18 @@ extern crate futures;
 extern crate tokio;
 extern crate tokio_executor;
 extern crate tokio_reactor;
+extern crate tokio_threadpool;
+extern crate tokio_timer;
 
-use futures::{future, stream};
-use futures::{Async, Future, Stream};
 use futures::stream::futures_unordered::FuturesUnordered;
+use futures::{Async, Future, Stream};
+use futures::{future, stream};
 use tokio::executor::thread_pool;
 use tokio::reactor;
 
-use std::{ops, thread, time};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::{ops, thread, time};
 
 const N_THREADS: isize = -1;
 
@@ -44,8 +47,8 @@ fn main() {
 
     // Future that receives from all the ports and bounces packets back
     let future = future::lazy(|| {
-        use tokio::net;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use tokio::net;
 
         let mut futures = FuturesUnordered::new();
 
@@ -102,11 +105,32 @@ fn main() {
         // Thread-pool based executor, basically the standard Runtime
         let mut pool_builder = thread_pool::Builder::new();
         let handle = reactor.handle();
-        pool_builder.around_worker(move |w, enter| {
-            ::tokio_reactor::with_default(&handle, enter, |_| {
-                w.run();
+
+        let timers = Arc::new(Mutex::new(HashMap::<_, ::tokio_timer::timer::Handle>::new()));
+        let t1 = timers.clone();
+
+        pool_builder
+            .around_worker(move |w, enter| {
+                let timer_handle = t1.lock().unwrap().get(w.id()).unwrap().clone();
+
+                ::tokio_reactor::with_default(&handle, enter, |enter| {
+                    ::tokio_timer::timer::with_default(&timer_handle, enter, |_| {
+                        w.run();
+                    });
+                });
+            })
+            .custom_park(move |worker_id| {
+                // Create a new timer
+                let timer =
+                    ::tokio_timer::timer::Timer::new(::tokio_threadpool::park::DefaultPark::new());
+
+                timers
+                    .lock()
+                    .unwrap()
+                    .insert(worker_id.clone(), timer.handle());
+
+                timer
             });
-        });
 
         if N_THREADS > 0 {
             pool_builder.pool_size(N_THREADS as usize);
@@ -125,12 +149,16 @@ fn main() {
         reactor.set_fallback().unwrap();
         let handle = reactor.handle();
         let mut enter = ::tokio_executor::enter().unwrap();
-        let mut current_thread = current_thread::CurrentThread::new_with_park(reactor);
+        let timer = ::tokio_timer::timer::Timer::new(reactor);
+        let timer_handle = timer.handle();
+        let mut current_thread = current_thread::CurrentThread::new_with_park(timer);
 
         current_thread.spawn(future);
 
-        ::tokio_reactor::with_default(&handle, &mut enter, move |enter| {
-            current_thread.enter(enter).run().unwrap();
+        ::tokio_reactor::with_default(&handle, &mut enter, move |mut enter| {
+            ::tokio_timer::with_default(&timer_handle, &mut enter, |enter| {
+                current_thread.enter(enter).run().unwrap();
+            })
         });
     }
 }
